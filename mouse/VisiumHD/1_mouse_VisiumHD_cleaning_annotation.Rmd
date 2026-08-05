@@ -1,0 +1,430 @@
+---
+title: "Seurat_visiumHD"
+author: "Bérénice Dugué"
+date: "19/12/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### I - Setting up the working environment
+#Loading libraries for the analysis
+```{r}
+library(Seurat) #v.5.4.0
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(sf)
+library(Matrix)
+library(qs)
+library(scCustomize)
+library(tibble)
+```
+
+#Loading Data in Seurat : Creating lists of Seurat object (one per batch, gruen and braun)
+# This function loads a whole VisiumHD batch at once. A "batch" is a folder that contains one subfolder per sample, and each sample subfolder contains a SpaceRanger "outs" folder (the standard 10x output directory).
+
+# Steps performed for each sample in the batch:
+#  1. List all sample subfolders inside base_dir, then point to their "outs" folder.
+#  2. Extract a clean sample name from the folder name using a regex (e.g. "Gruen_Set1_WTEV_X3" instead of the full raw folder name).
+#  3. Load the spatial data with Load10X_Spatial(), using bin.size = c("polygons", 8), which tells Seurat to load BOTH the polygon (cell segmentation) data AND the 8-micron binned data.
+#  4. Store the resulting Seurat object in a named list, so seurat_list$SAMPLE_NAME  gives you that sample's Seurat object.
+
+# base_dir       : path to the batch's root folder
+# sample_pattern : regex used to extract a clean sample name from the folder name
+```{r load-batch-function}
+load_batch <- function(base_dir, sample_pattern) {
+  outs_dirs <- list.dirs(path = base_dir, recursive = FALSE, full.names = TRUE)
+  outs_dirs <- file.path(outs_dirs, "outs")
+
+  seurat_list <- list()
+  for (d in outs_dirs) {
+    full_name   <- basename(dirname(d))
+    sample_name <- sub(sample_pattern, "\\1", full_name)
+    message("Loading ", sample_name)
+    seurat_list[[sample_name]] <- Load10X_Spatial(
+      data.dir = d,
+      slice    = sample_name,
+      bin.size = c("polygons", 8)
+    ) }
+  seurat_list }
+```
+
+```{r load-batch-run, eval=FALSE}
+path_gruen_raw   <- "~Gruen"
+path_braun_raw    <- "~Braun"
+
+seurat_list_gruen <- load_batch(path_gruen_raw, "^.*_(Gruen_Set1_.*)$")
+seurat_list_braun  <- load_batch(path_braun_raw,  "^.*_(Braun_Set2_.*)$")
+```
+
+# Cropping strategy to keep only the correct image per sample (workaround for a SpaceRanger pipeline issue: each sample's full-resolution image contains all the samples side by side, so we need to crop out just the region of interest, ROI, that belongs to each individual sample).
+```{r}
+roi_coords_braun <- list(
+  Braun_Set2_WTEV_X3 = list(xmin = 185, xmax = 280,  ymin = 25,  ymax = 120  ),
+  Braun_Set2_WTEV_X4 = list(xmin = 290, xmax = 390,  ymin = 25,  ymax = 120),
+  Braun_Set2_WTEV_X5 = list(xmin = 390, xmax = 490,  ymin = 25,  ymax = 120),
+  Braun_Set2_WTThPO_X6 = list(xmin = 490, xmax = 590,  ymin = 25,  ymax = 120),
+
+  Braun_Set2_WTThPO_X3 = list(xmin = 185, xmax = 280,  ymin = 130,  ymax = 220),
+  Braun_Set2_WTThPO_X4 = list(xmin = 290, xmax = 390,  ymin = 130,  ymax = 220),
+  Braun_Set2_C3KOEV_X5Y2 = list(xmin = 390, xmax = 490,  ymin = 130,  ymax = 220),
+
+  Braun_Set2_C3KOEV_X3 = list(xmin = 185, xmax = 280,  ymin = 230,  ymax = 330),
+  Braun_Set2_C3KOThPO_X4Y3 = list(xmin = 290, xmax = 390,  ymin = 230,  ymax = 330),
+  Braun_Set2_C3KOEV_X5Y3 = list(xmin = 390, xmax = 490,  ymin = 230,  ymax = 330),
+
+  Braun_Set2_C3KOThPO_X3 = list(xmin = 185, xmax = 280,  ymin = 330,  ymax = 430),
+  Braun_Set2_C3KOThPO_X4Y4 = list(xmin = 290, xmax = 390,  ymin = 330,  ymax = 430) )
+
+roi_coords_gruen <- list(
+  Gruen_Set1_WTEV_X3 = list(xmin = 195, xmax = 288,  ymin = 25,  ymax = 120  ),
+  Gruen_Set1_WTEV_X4 = list(xmin = 290, xmax = 390,  ymin = 25,  ymax = 120),
+  Gruen_Set1_WTEV_X5 = list(xmin = 390, xmax = 490,  ymin = 25,  ymax = 120),
+  Gruen_Set1_WTThPO_X6 = list(xmin = 490, xmax = 590,  ymin = 25,  ymax = 120),
+  
+  Gruen_Set1_WTThPO_X3 = list(xmin = 185, xmax = 280,  ymin = 130,  ymax = 220),
+  Gruen_Set1_WTThPO_X4 = list(xmin = 290, xmax = 390,  ymin = 130,  ymax = 220), 
+  Gruen_Set1_C3KO_EV_X5Y2 = list(xmin = 390, xmax = 490,  ymin = 130,  ymax = 220),
+  
+  Gruen_Set1_C3KO_EV_X3 = list(xmin = 185, xmax = 280,  ymin = 225,  ymax = 320), 
+  Gruen_Set1_C3KO_ThPO_X4Y3 = list(xmin = 290, xmax = 390,  ymin = 225,  ymax = 320), 
+  Gruen_Set1_C3KO_EV_X5Y3 = list(xmin = 390, xmax = 490,  ymin = 225,  ymax = 320), 
+  
+  Gruen_Set1_C3KO_ThPO_X3 = list(xmin = 185, xmax = 280,  ymin = 322,  ymax = 415), 
+  Gruen_Set1_C3KO_ThPO_X4Y4 = list(xmin = 290, xmax = 390,  ymin = 322,  ymax = 415) )
+```
+
+```{r crop-function}
+# Fonction générique de cropping par ROI (remplace le duplicata gruen/braun)
+crop_by_roi <- function(seurat_list, roi_coords) {
+  seurat_roi_list <- list()
+  for (nm in names(seurat_list)) {
+    if (!nm %in% names(roi_coords)) {
+      warning("No ROI defined for ", nm)
+      next
+    }
+    seu <- seurat_list[[nm]]
+    roi <- roi_coords[[nm]]
+
+    image_name <- paste0(nm, ".polygons")
+    tissue     <- GetTissueCoordinates(seu, image = image_name)
+    factor     <- seu@images[[image_name]]@scale.factors[["lowres"]]
+
+    tissue_filtered <- tissue[
+      tissue$x * factor >= roi$xmin & tissue$x * factor <= roi$xmax &
+      tissue$y * factor >= roi$ymin & tissue$y * factor <= roi$ymax, ]
+
+    cropped_cells <- tissue_filtered$cell
+    seurat_roi_list[[nm]] <- subset(seu, cells = cropped_cells)
+    message("Subset done for ", nm, ": ", ncol(seurat_roi_list[[nm]]), " cells")
+  }
+  seurat_roi_list
+}
+```
+
+```{r crop-run, eval=FALSE}
+seurat_roi_list_gruen <- crop_by_roi(seurat_list_gruen, roi_coords_gruen)
+seurat_roi_list_braun  <- crop_by_roi(seurat_list_braun,  roi_coords_braun)
+```
+
+#Merging the lists of interest into a single Seurat object
+```{r}
+seurat_merged_gruen <- merge(seurat_roi_list_gruen[[1]],
+  y = seurat_roi_list_gruen[-1],
+  add.cell.ids = names(seurat_roi_list_gruen))
+
+seurat_merged_braun <- merge(seurat_roi_list_braun[[1]],
+  y = seurat_roi_list_braun[-1],
+  add.cell.ids = names(seurat_roi_list_braun))
+
+seurat_merged_total = merge(seurat_merged_gruen,y=seurat_merged_braun)
+
+seurat_merged_total$orig.ident <- NULL
+seurat_merged_total$orig.ident <- sub("_cellid.*$", "", rownames(seurat_merged_total[[]]))
+table(seurat_merged_total$orig.ident)
+
+seurat_merged_total$log_nCount <- log(seurat_merged_total$nCount_Spatial.Polygons)
+```
+
+### II - Control Quality
+# At the time of the analysis, Seurat did not yet provide an official QC workflow in its vignettes for segmented VisiumHD data (only for data at binned resolution). 10x support shared a few informal observations on this topic:
+# - Segmented data generally needs less filtering than binned data, so a more lenient lower total-UMI cutoff is reasonable.
+# - Whether scaling helps is worth testing case by case: sometimes it makes annotation easier, sometimes it doesn't.
+# - Annotation tends to be easier with segmented data.
+
+```{r}
+## Quick look at sequencing depth (log total UMI count) in space, for some samples
+SpatialFeaturePlot(object = seurat_merged_total, features = c("log_nCount"),  
+                   images = "Braun_Set2_WTEV_X3.polygons", #here replace by the name of the sample of interest
+  plot_segmentations = TRUE,pt.size.factor = 0.5,stroke = 0.1)  
+
+# Compute mitochondrial percentage per cell 
+seurat_merged_total[["percent.mito"]] = PercentageFeatureSet(seurat_merged_total, pattern = "^mt-")
+
+# Standard QC diagnostic plots, split by sample (orig.ident):
+VlnPlot(seurat_merged_total, features = c("nCount_Spatial.Polygons","nFeature_Spatial.Polygons"), pt.size = 0, group.by = "orig.ident")
+VlnPlot(seurat_merged_total, features = c("percent.mito"), group.by = "orig.ident")
+FeatureScatter(seurat_merged_total, feature1 = "nCount_Spatial.Polygons", feature2 = "percent.mito")
+```
+
+```{r}
+# Apply QC filtering thresholds chosen from the diagnostics above.
+seurat_merged_total_filtered = subset(seurat_merged_total, subset = nCount_Spatial.Polygons > 5 & nCount_Spatial.Polygons < 5000 & percent.mito < 20 )
+
+# Compare cell counts per sample before vs. after filtering
+table(seurat_merged_total$orig.ident)
+table(seurat_merged_total_filtered$orig.ident)
+```
+
+### III - From normalization to cluster annotation
+#A) Normalization
+```{r}
+DefaultAssay(seurat_merged_total_filtered) <- "Spatial.Polygons"
+
+seurat_merged_total_normalized <- NormalizeData(seurat_merged_total_filtered, assay = "Spatial.Polygons", new.assay.name = "Normalized.Polygon") 
+```
+
+#B) Clustering
+https://satijalab.org/seurat/articles/visiumhd_analysis_vignette#unsupervised-clustering
+https://satijalab.org/seurat/articles/parsebio_sketch_integration 
+```{r}
+object <- SketchData( object = seurat_merged_total_normalized, ncells = 10000,  method = "LeverageScore",  sketched.assay = "sketch")
+
+# switch analysis to sketched cells
+DefaultAssay(object) <- "sketch"
+
+object <- FindVariableFeatures(object, verbose = T)
+object <- ScaleData(object, verbose = T)
+object <- RunPCA(object, verbose = T)
+object <- IntegrateLayers(object, method = HarmonyIntegration, orig = "pca", new.reduction = "harmony", verbose = T)
+object <- FindNeighbors(object, reduction = "harmony", dims = 1:30)
+object <- FindClusters(object, resolution = 0.7, verbose = TRUE)
+object <- RunUMAP(object, reduction = "harmony", dims = 1:30, return.model = T, verbose = T) 
+```
+
+```{r}
+options(future.globals.maxSize = 3e+09)
+object_full <- ProjectIntegration(object = object, sketched.assay = "sketch", assay = "Spatial.Polygons", reduction = "harmony")
+object_full <- ProjectData(object = object_full, sketched.assay = "sketch", assay = "Spatial.Polygons", sketched.reduction = "harmony",full.reduction = "harmony.full", dims = 1:30, refdata = list(celltype.full.res0.7 = "sketch_snn_res.0.7"))
+```
+
+```{r}
+# object_full <- RunUMAP(object_full, reduction = "harmony.full", dims = 1:30, reduction.name = "umap.full", reduction.key = "UMAP_full_")
+# DimPlot(object_full, group.by = "celltype.full", reduction = "umap.full", raster=FALSE)
+```
+
+#C) Adding relevant metadata to each sample
+```{r}
+#Adding metadata
+object_full$batch <- sub("_.*$", "", object_full$orig.ident)
+object_full$condition <- sub(
+  "^.*_(WT|C3KO)_?(EV|ThPO)_.*$",
+  "\\1\\2",  object_full$orig.ident)
+
+
+table(object_full$batch)
+table(object_full$condition)
+```
+
+#D) Identifying marker genes to annotate clusters
+```{r}
+object_joined = object_full
+object_joined[["sketch"]] <- JoinLayers(object_joined[["sketch"]])
+DefaultAssay(object_joined) <- "sketch"
+object_joined@active.ident = object_joined$sketch_snn_res.0.7
+
+markers_0.7 <- FindAllMarkers(object = object_joined, max.cells.per.ident = 500, only.pos = TRUE)
+head(markers_0.7)
+markers_0.7 %>% group_by(cluster) %>% dplyr::filter(avg_log2FC > 1) %>% slice_head(n = 5) %>% ungroup() -> top5
+
+
+object_joined[["Spatial.Polygons"]] <- JoinLayers(object_joined[["Spatial.Polygons"]])
+# Crete downsampled object to improve visualization of marker genes across clusters
+DefaultAssay(object_joined) <- "Spatial.Polygons"
+Idents(object_joined) <- "sketch_snn_res.0.7"
+object_subset <- subset(object_joined, cells = Cells(object[["Spatial.Polygons"]]), downsample = 2000)
+object_subset <- ScaleData(object_subset, assay = "Spatial.Polygons", features = top5$gene)
+DoHeatmap(object_subset, assay = "Spatial.Polygons", features = top5$gene, size = 4) + theme(axis.text = element_text(size = 7)) + NoLegend()
+```
+
+#E) Cluster annotation
+```{r}
+#Cluster annotation
+object_full@active.ident = as.factor(object_full$celltype.full.res0.7)
+new_names <- c("RP_Mk","WP_TCZ", "RP_RC",
+               "RP_cDc","WP_BCZ","RP_GR","WP_Plasma_Cells","WP_BCZ",
+               "WP_BCZ","RP_macrophages","Vessels_Muscular","RP_Neutro","RP_GR", "WP_RC",
+               "WP_BCZ","WP_TCZ","WP_BCZ","WP_BCZ","WP_BCZ",
+               "WP_BCZ","WP_BCZ","WP_BCZ","WP_BCZ", "WP_BCZ", "WP_BCZ",
+               "WP_TCZ","WP_BCZ","Other","Other", 
+               "WP_RC", "WP_BCZ", 
+               "Vessels_Endothelial","RP_Neutro","WP_BCZ","WP_BCZ")
+names(new_names) <- levels(object_full)
+
+object_full <- RenameIdents(object = object_full, new_names)
+object_full$renamed_res07_RP = object_full@active.ident
+object_full$renamed_res07_RP = factor(object_full$renamed_res07_RP, levels = c("WP_BCZ","WP_RC","WP_TCZ","WP_Plasma_Cells","Other","RP_RC","RP_cDc","RP_macrophages","RP_Mk","RP_Neutro","RP_GR","Vessels_Muscular","Vessels_Endothelial"))
+
+#Vizualisation of annotated clusters
+DimPlot(object_full, group.by = "renamed_res07_RP", reduction = "umap", raster=FALSE, cols = c( "#8DB6CD","#00CDCD","#CAE1FF","#B0E2FF","grey","#d87373ff","#e1adadff","#8f4949ff","#90aa85ff","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+
+my_groups <- levels(object_full$renamed_res07_RP)
+colors <-c( "#8DB6CD","#00CDCD","#CAE1FF","#B0E2FF","grey","#d87373ff","#e1adadff","#8f4949ff","#90aa85ff","#A2CD5A","#B4EEB4","#DE9B53","#CD8162")
+names(colors) <- my_groups     
+
+object_full@active.assay = "Spatial.Polygons"
+SpatialDimPlot(object = object_full, group.by = "renamed_res07_RP", ncol = 1, images = "Braun_Set2_WTEV_X3.polygons", plot_segmentations = T, cols = colors, pt.size.factor = 0.1, stroke = 0.1, alpha =1)
+```
+
+#Sub-clustering the red-pulp EMH region :
+#Isolate the red-pulp clusters that contain extramedullary hematopoiesis (EMH) cells — granulocytes, neutrophils, megakaryocytes — and re-cluster just that subset, to see if we can improve clustering resolution and identify hematopoietic stem and progenitor cell (HSPC) populations hiding within it.
+```{r}
+RP_subset_object_full = subset(object_full, subset = renamed_res07_RP %in% c("RP_GR","RP_Neutro","RP_Mk")) 
+DefaultAssay(RP_subset_object_full) <- "sketch"
+RP_subset_object_full <- FindVariableFeatures(RP_subset_object_full, verbose = TRUE)
+RP_subset_object_full <- ScaleData(RP_subset_object_full, verbose = TRUE)
+RP_subset_object_full <- RunPCA(RP_subset_object_full, verbose = TRUE)
+ElbowPlot(RP_subset_object_full)
+RP_subset_object_full <- IntegrateLayers(RP_subset_object_full, method = HarmonyIntegration, orig = "pca", new.reduction = "harmony", verbose = T)
+
+ndim = 10
+RP_subset_object_full <- RunUMAP(RP_subset_object_full, reduction = "harmony", dims = 1:ndim)
+DefaultAssay(RP_subset_object_full) <- "sketch"
+RP_subset_object_full <- FindNeighbors(RP_subset_object_full, reduction = "harmony", dims = 1:ndim) %>% FindClusters( resolution = 0.1, random.seed = 0)
+RP_subset_object_full = RP_subset_object_full %>% FindClusters( resolution = 0.25, random.seed = 0)
+
+#Project the sketch-based clustering back onto all cells (not just the subsampled ones) before annotating, so every cell in the subset gets a label.
+options(future.globals.maxSize = 3e+09)
+RP_subset_object_full <- ProjectIntegration(object = RP_subset_object_full, sketched.assay = "sketch", assay = "Spatial.Polygons", reduction = "harmony")
+RP_subset_object_full <- ProjectData(object = RP_subset_object_full, sketched.assay = "sketch", assay = "Spatial.Polygons", sketched.reduction = "harmony",full.reduction = "harmony.full", dims = 1:10, refdata = list(celltype.full.res0.25.HSPC = "sketch_snn_res.0.25")) 
+DimPlot(RP_subset_object_full, group.by = "celltype.full.res0.25.HSPC", reduction = "umap", raster=FALSE)
+```
+
+#Annotation of each of the 5 sub-clusters, based on marker genes expression.
+```{r}
+# Check known marker genes for HSPCs / erythroid / megakaryocyte lineages to guide the annotation further down.
+DefaultAssay(RP_subset_object_full) <- "Spatial.Polygons"
+FeaturePlot_scCustom(RP_subset_object_full, features = c("Cd34", "Ptprc", "Mycn", "Gata1", "Tubb1", "Thy1"), num_columns = 3)
+FeaturePlot_scCustom(RP_subset_object_full, features = c("Cd34", "Myb", "Mycn", "Hbb-bt", "Ppbp", "S100a8"), num_columns = 3)
+
+RP_subset_object_full@active.ident = as.factor(RP_subset_object_full$celltype.full.res0.25.HSPC)
+new_names <- c("RP_Mk","RP_Neutro","RP_Ery","RP_Ery","RP_Mk_progenitors")
+names(new_names) <- levels(RP_subset_object_full)
+RP_subset_object_full <- RenameIdents(object = RP_subset_object_full, new_names)
+RP_subset_object_full$renamed_HSPC = RP_subset_object_full@active.ident
+RP_subset_object_full$renamed_HSPC = factor(RP_subset_object_full$renamed_HSPC, levels = c("RP_Mk","RP_Neutro","RP_Ery","RP_Mk_progenitors"))
+
+DimPlot(RP_subset_object_full, group.by = "renamed_HSPC", reduction = "umap", raster=FALSE)
+```
+
+#Transfer of the sub-annotations back onto the full Seurat object
+```{r}
+annotations <- RP_subset_object_full$renamed_HSPC
+names(annotations) <- colnames(RP_subset_object_full)
+# Create a new column in the metadata of the larger object
+object_full$Transferred_Annotations <- object_full$renamed_res07_RP
+object_full$Transferred_Annotations = factor(object_full$Transferred_Annotations, levels = c("WP_BCZ","WP_RC","WP_TCZ","WP_Plasma_Cells","Other","RP_RC","RP_cDc","RP_macrophages","RP_Mk_progenitors","RP_Mk","RP_Neutro","RP_Ery","Vessels_Muscular","Vessels_Endothelial"))
+
+# Map the annotations to the corresponding cells in the larger object
+common_cells<- intersect(colnames(object_full), names(annotations))
+object_full$Transferred_Annotations[common_cells] <- annotations[common_cells]
+table(is.na(object_full$Transferred_Annotations))
+
+# Visual check of the merged annotation
+DimPlot(object_full, group.by = "Transferred_Annotations", raster = FALSE, cols = c( "#8DB6CD","#00CDCD","#CAE1FF","#B0E2FF","grey","#d87373ff","#e1adadff","#8f4949ff","#445c45ff","#90aa85ff","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+```
+
+#Cleaning the final annotated object and exporting the final annotation figure
+```{r}
+object_full_clean = subset(object_full, subset = renamed_res07_RP != "Other" ) #removing undefined/suspect cells
+
+object_full_clean$Transferred_Annotations = factor(object_full_clean$Transferred_Annotations, levels = c("RP_RC","WP_RC","WP_BCZ","WP_TCZ","WP_Plasma_Cells","RP_cDc","RP_macrophages","RP_Mk_progenitors","RP_Mk","RP_Neutro","RP_Ery","Vessels_Muscular","Vessels_Endothelial"))
+
+DimPlot(object_full_clean, group.by = "Transferred_Annotations", raster = FALSE, cols = c("#CD9B1D","#EEDC82", "#8DB6CD","#CAE1FF","#B0E2FF","#d87373ff","#e1adadff","#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+
+my_groups <- levels(object_full_clean$Transferred_Annotations)
+colors <-  c("#CD9B1D","#EEDC82","#8DB6CD","#CAE1FF","#B0E2FF","#d87373ff","#e1adadff","#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162")
+names(colors) <- my_groups     
+SpatialDimPlot( object = object_full_clean,  group.by = "Transferred_Annotations", images = c("Braun_Set2_WTEV_X3.polygons","Gruen_Set1_C3KO_ThPO_X3.polygons","Braun_Set2_WTThPO_X6.polygons"), plot_segmentations = T, cols =colors, pt.size.factor = 0.1, stroke = 0.05, alpha =1)
+```
+
+#Creation of an intermediate resolution annotation (distinguishing Mk_progenitors among hematopoietic cells, but looking at the global "healthy" RP compartment as a whole)
+```{r}
+object_full_clean@active.ident = as.factor(object_full_clean$Transferred_Annotations)
+new_names <- c("RP",  "WP_RC", "WP_BCZ" , "WP_TCZ", "WP_Plasma_Cells", "RP",  "RP"   ,"RP_Mk_progenitors", "RP_Mk",               "RP_Neutro" ,"RP_Ery", "Vessels_Muscular",    "Vessels_Endothelial")
+names(new_names) <- levels(object_full_clean)
+
+object_full_clean <- RenameIdents(object = object_full_clean, new_names)
+object_full_clean$Final_Annotations = object_full_clean@active.ident
+object_full_clean$Final_Annotations = factor(object_full_clean$Final_Annotations, levels = c("WP_RC","WP_BCZ","WP_TCZ","WP_Plasma_Cells","RP","RP_Mk_progenitors","RP_Mk","RP_Neutro","RP_Ery","Vessels_Muscular","Vessels_Endothelial"))
+
+DimPlot(object_full_clean, group.by = "Final_Annotations", raster = FALSE, cols = c("#EEDC82","#8DB6CD","#CAE1FF","#B0E2FF", "#c26a6aff",  "#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+
+my_groups <- levels(object_full_clean$Final_Annotations)
+colors <-   c("#EEDC82","#8DB6CD","#CAE1FF","#B0E2FF", "#c26a6aff",  "#90aa85ff","#557956f5","#A2CD5A","#B4EEB4", "#DE9B53","#CD8162")
+names(colors) <- my_groups     
+SpatialDimPlot( object = object_full_clean,  group.by = "Final_Annotations", ncol = 3,   images = c("Braun_Set2_WTEV_X3.polygons","Gruen_Set1_C3KO_ThPO_X3.polygons","Braun_Set2_WTThPO_X6.polygons"), plot_segmentations = T, cols =colors , pt.size.factor = 0.1,stroke = 0.05, alpha =1 )
+```
+
+### IV - Exporting the final clean annotated VisiumHD object
+```{r}
+object_full_clean$final_annotation = object_full_clean$Final_Annotations
+object_full_clean$final_annotation_high_res = object_full_clean$Transferred_Annotations
+
+DimPlot(object_full_clean, group.by = "final_annotation", raster = FALSE, cols = c("#EEDC82","#8DB6CD","#CAE1FF","#B0E2FF", "#c26a6aff",  "#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+ DimPlot(object_full_clean, group.by = "final_annotation_high_res", raster = FALSE, cols = c("#CD9B1D","#EEDC82", "#8DB6CD","#CAE1FF","#B0E2FF","#d87373ff","#e1adadff","#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+ 
+# Defining the columns I want to keep
+columns_to_keep <- c("batch","condition","percent.mito","nCount_Spatial.008um","nFeature_Spatial.008um","nCount_Spatial.Polygons","nFeature_Spatial.Polygons","orig.ident","log_nCount",  "final_annotation", "final_annotation_high_res")
+
+# Create a new object with only selected metadata columns
+export_visiumHD <- object_full_clean
+export_visiumHD@meta.data <- object_full_clean@meta.data[, columns_to_keep, drop = FALSE]
+  
+qsave(export_visiumHD,"updated_VisiumHD_mouse_export.qs")
+```
+
+#Looking at marker genes expression in all annotated clusters
+```{r}
+export_visiumHD@active.assay = "Spatial.Polygons"
+
+#overview resolution
+marker = DotPlot_scCustom(seurat_object = export_visiumHD, features = c("Ccl19","Ighd","Trac","Jchain","Cxcl12","Vcam1","Cd5l","Cd34","Gata1","Ppbp","S100a8","Hbb-bt","Acta2","Eng"), flip_axes = T, #Alas2
+    x_lab_rotate = TRUE, group.by = "final_annotation")
+marker
+
+#high resolution
+export_visiumHD$final_annotation_high_res = factor(export_visiumHD$final_annotation_high_res, levels = c("WP_RC","WP_BCZ","WP_TCZ","WP_Plasma_Cells","RP_RC","RP_cDc","RP_macrophages","RP_Mk_progenitors","RP_Mk","RP_Neutro","RP_Ery","Vessels_Muscular","Vessels_Endothelial"))
+marker = DotPlot_scCustom(seurat_object = export_visiumHD, features = c("Ccl19","Ighd","Trac","Jchain","Cxcl12","Wt1","Clec9a","Vcam1","Cd5l","Cd34","Gata1","Ppbp","S100a8","Hbb-bt","Acta2","Eng"), flip_axes = T, x_lab_rotate = TRUE, group.by = "final_annotation_high_res")
+marker
+```
+
+### V - Studying cell type proportions across condition of interest
+```{r}
+export_visiumHD$condition = factor(export_visiumHD$condition, levels = c("C3KOEV","WTEV","C3KOThPO","WTThPO"))
+
+#overview resolution
+breakdown<-as.data.frame(table(export_visiumHD$final_annotation, object_full_clean@meta.data$orig.ident, object_full_clean@meta.data$condition))
+colnames(breakdown) = c("Cluster","Sample","Disease","Nb_cells")
+
+overall_prop = ggplot(breakdown, aes(x = Disease, y = Nb_cells, fill = Cluster)) +
+  theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) +  xlab("Cluster") + ylab("Proportion of each sample") +
+  theme_classic(base_size = 15) + coord_flip()  + scale_fill_manual(values = c("#EEDC82","#8DB6CD","#CAE1FF","#B0E2FF", "#c26a6aff", "#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+overall_prop
+
+#high resolution
+export_visiumHD$final_annotation_high_res = factor(export_visiumHD$final_annotation_high_res, levels = c("RP_RC","WP_RC","WP_BCZ","WP_TCZ","WP_Plasma_Cells","RP_cDc","RP_macrophages","RP_Mk_progenitors","RP_Mk","RP_Neutro","RP_Ery","Vessels_Muscular","Vessels_Endothelial"))
+breakdown<-as.data.frame(table(export_visiumHD$final_annotation_high_res, export_visiumHD@meta.data$orig.ident, export_visiumHD@meta.data$condition))
+colnames(breakdown) = c("Cluster","Sample","Disease","Nb_cells")
+
+high_res_prop = ggplot(breakdown, aes(x = Disease, y = Nb_cells, fill = Cluster)) +
+  theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Cluster") + ylab("Proportion of each sample") +
+  theme_classic(base_size = 15) + coord_flip()  + scale_fill_manual(values = c("#CD9B1D","#EEDC82", "#8DB6CD","#CAE1FF","#B0E2FF","#d87373ff","#e1adadff","#90aa85ff","#557956f5","#A2CD5A","#B4EEB4","#DE9B53","#CD8162"))
+high_res_prop
+```
+
+
